@@ -11,10 +11,11 @@ st.title("XAUT/USD Master Strategy: S&D + Liquidity Sweep")
 st.sidebar.header("Confluence Parameters")
 initial_capital = st.sidebar.number_input("Initial Capital ($)", value=1000)
 lot_size = st.sidebar.number_input("Lot Size (oz)", value=1.0) 
-momentum_mult = st.sidebar.slider("S&D Momentum (ATR)", 1.0, 4.0, 2.0, 0.1)
-pivot_len = st.sidebar.number_input("Liquidity Swing Length", min_value=2, value=3)
+momentum_mult = st.sidebar.slider("S&D Momentum (ATR)", 1.0, 4.0, 1.5, 0.1)
+pivot_len = st.sidebar.number_input("Liquidity Swing Length", min_value=2, value=2)
 rr_ratio = st.sidebar.slider("Risk Reward Ratio", 1.0, 5.0, 2.0, 0.5)
-days_history = st.sidebar.slider("Days of Data (15m TF)", 5, 59, 30)
+relax_filter = st.sidebar.checkbox("Relax Confluence (Take all sweeps/zones)", value=True)
+days_history = st.sidebar.slider("Days of Data (15m TF)", 5, 59, 59)
 
 # --- DATA FETCHING ---
 @st.cache_data(ttl=900)
@@ -30,7 +31,6 @@ with st.spinner("Calculating Confluence Zones..."):
 
 # --- CONFLUENCE ENGINE ---
 if not df.empty:
-    # Math & Indicators
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
@@ -91,35 +91,56 @@ if not df.empty:
 
         equity_curve.append(balance)
 
-        # 2. Master Confluence Entries
+        # 2. Entries Logic
         if not in_pos:
-            # Check Long Confluence: Bull Sweep inside Active Demand
-            if row['Bull_Sweep']:
-                for z in active_demand_zones[:]:
-                    if row['Low'] <= z['top'] and row['Low'] >= z['bottom']: # Tapped zone during sweep
-                        entry_price = row['Close'] # Enter on candle close after sweep
-                        sl = min(row['Low'], z['bottom']) - (row['ATR'] * 0.2)
-                        risk = entry_price - sl
-                        if risk > 0:
-                            tp = entry_price + (risk * rr_ratio)
-                            pos_type = 'LONG'
-                            in_pos = True
-                            active_demand_zones.remove(z)
-                            break
-            
-            # Check Short Confluence: Bear Sweep inside Active Supply
-            if not in_pos and row['Bear_Sweep']:
-                for z in active_supply_zones[:]:
-                    if row['High'] >= z['bottom'] and row['High'] <= z['top']:
-                        entry_price = row['Close']
-                        sl = max(row['High'], z['top']) + (row['ATR'] * 0.2)
-                        risk = sl - entry_price
-                        if risk > 0:
-                            tp = entry_price - (risk * rr_ratio)
-                            pos_type = 'SHORT'
-                            in_pos = True
-                            active_supply_zones.remove(z)
-                            break
+            if relax_filter:
+                # Relaxed: Take trades on either valid S&D zone tap OR Liquidity Sweep
+                zone_tapped_long = any(row['Low'] <= z['top'] and row['Low'] >= z['bottom'] for z in active_demand_zones)
+                zone_tapped_short = any(row['High'] >= z['bottom'] and row['High'] <= z['top'] for z in active_supply_zones)
+
+                if row['Bull_Sweep'] or zone_tapped_long:
+                    entry_price = row['Close']
+                    sl = row['Low'] - (row['ATR'] * 0.5)
+                    risk = entry_price - sl
+                    if risk > 0:
+                        tp = entry_price + (risk * rr_ratio)
+                        pos_type = 'LONG'
+                        in_pos = True
+                elif row['Bear_Sweep'] or zone_tapped_short:
+                    entry_price = row['Close']
+                    sl = row['High'] + (row['ATR'] * 0.5)
+                    risk = sl - entry_price
+                    if risk > 0:
+                        tp = entry_price - (risk * rr_ratio)
+                        pos_type = 'SHORT'
+                        in_pos = True
+            else:
+                # Strict Confluence: Sweep INSIDE zone
+                if row['Bull_Sweep']:
+                    for z in active_demand_zones[:]:
+                        if row['Low'] <= z['top'] and row['Low'] >= z['bottom']:
+                            entry_price = row['Close']
+                            sl = min(row['Low'], z['bottom']) - (row['ATR'] * 0.2)
+                            risk = entry_price - sl
+                            if risk > 0:
+                                tp = entry_price + (risk * rr_ratio)
+                                pos_type = 'LONG'
+                                in_pos = True
+                                active_demand_zones.remove(z)
+                                break
+                
+                if not in_pos and row['Bear_Sweep']:
+                    for z in active_supply_zones[:]:
+                        if row['High'] >= z['bottom'] and row['High'] <= z['top']:
+                            entry_price = row['Close']
+                            sl = max(row['High'], z['top']) + (row['ATR'] * 0.2)
+                            risk = sl - entry_price
+                            if risk > 0:
+                                tp = entry_price - (risk * rr_ratio)
+                                pos_type = 'SHORT'
+                                in_pos = True
+                                active_supply_zones.remove(z)
+                                break
 
         # 3. Clean up broken zones
         active_demand_zones = [z for z in active_demand_zones if row['Close'] > z['bottom']]
@@ -137,9 +158,7 @@ if not df.empty:
                 active_supply_zones.append(zone)
                 zone_shapes.append(dict(type="rect", x0=zone['start'], y0=zone['bottom'], x1=df.index[-1], y1=zone['top'], fillcolor="rgba(255, 0, 0, 0.1)", line=dict(width=0)))
 
-    # Ensure equity curve aligns by prepending initial capital for the 0th index
     df['Equity'] = [initial_capital] + equity_curve
-
     trade_df = pd.DataFrame(trade_log)
 
     # --- UI DISPLAY ---
@@ -172,14 +191,14 @@ if not df.empty:
             fig.add_trace(go.Scatter(x=shorts['Date'], y=shorts['Target'], mode='markers', marker=dict(color='green', size=7, symbol='circle'), name='Short Target'))
             fig.add_trace(go.Scatter(x=shorts['Date'], y=shorts['StopLoss'], mode='markers', marker=dict(color='red', size=7, symbol='x'), name='Short SL'))
 
-        fig.update_layout(height=700, template='plotly_dark', title="Master Confluence: Sweeps inside S&D Zones", xaxis_rangeslider_visible=False, shapes=zone_shapes[-30:]) 
+        fig.update_layout(height=700, template='plotly_dark', title="Master Confluence Strategy", xaxis_rangeslider_visible=False, shapes=zone_shapes[-30:]) 
         st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
         if not trade_df.empty:
             st.dataframe(trade_df[['Date', 'Type', 'Entry', 'Target', 'StopLoss', 'Result', 'PnL']].style.map(lambda x: 'color: green' if x == 'Win' else ('color: red' if x == 'Loss' else ''), subset=['Result']))
         else:
-            st.info("No Confluence Trades executed. This is a high-probability, low-frequency strategy.")
+            st.info("No trades executed.")
 
 else:
     st.error("Failed to fetch data.")
