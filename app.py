@@ -138,7 +138,7 @@ if not df.empty:
                 zone_shapes.append(dict(type="rect", x0=zone['start'], y0=zone['bottom'], x1=df.index[-1], y1=zone['top'], fillcolor="rgba(255, 0, 0, 0.1)", line=dict(width=0)))
 
     # Ensure equity curve aligns by prepending initial capital for the 0th index
-    df['Equity'] = [initial_capital] + equity_curve_
+    df['Equity'] = [initial_capital] + equity
     trade_df = pd.DataFrame(trade_log)
 
     # --- UI DISPLAY ---
